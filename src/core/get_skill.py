@@ -17,6 +17,8 @@
     - 按 d + Enter 删除最后一个已保存的路点
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import time

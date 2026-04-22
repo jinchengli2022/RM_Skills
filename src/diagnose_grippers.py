@@ -15,7 +15,7 @@ import sys
 import os
 from typing import List, Tuple, Dict, Optional
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.core.dual_gripper import DualGripper, DualGripperConfig
 

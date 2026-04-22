@@ -12,6 +12,7 @@ CTAG2F90D（Servo）控制器SDK (基于Modbus RTU的RS-485通信)
 
 import time
 import threading
+import glob
 import minimalmodbus
 import serial
 
@@ -247,43 +248,39 @@ class MotorController:
 
 
 if __name__ == "__main__":
-    for port_i in range(3):
-        for slave_j in range(5):
+    ports = sorted(glob.glob("/dev/ttyUSB*"))
+    slave_ids = range(1, 11)
 
-            # 示例用法（根据实际设备调整端口/从机ID）
-            PORT = f"/dev/ttyUSB{port_i}"
-            SLAVE_ID = slave_j
-            print(f"\n测试连接: 端口={PORT}, 从机ID={SLAVE_ID}")
+    if not ports:
+        print("未发现 /dev/ttyUSB* 串口，请检查 USB 转 RS485 连接。")
+        raise SystemExit(1)
 
-            sdk = MotorController(PORT, SLAVE_ID, baudrate=115200, timeout=1.0)
+    print("开始扫描可通信组合...")
+    print(f"端口列表: {ports}")
+    print(f"从机 ID 范围: {slave_ids.start}~{slave_ids.stop - 1}")
 
+    hits = []
+    for port in ports:
+        for slave_id in slave_ids:
+            sdk = None
             try:
-                # 启动实时监控
-                sdk.start_monitoring(interval=0.5)
-                
-                # 循环控制：5次往复运动
-                # 假设 9000 为闭合位置，0 为张开位置
-                # 最后一次循环结束后，确保处于张开位置 (0)
-                for i in range(5):
-                    print(f"\n--- 第 {i+1}/5 次循环 ---")
-                    
-                    # 阶段1: 运动到位置 9000 (闭合?)
-                    sdk.temp_move(position_mm=9000, speed_pct=50, force_pct=25, accel=60, decel=60, trigger=True)
-                    time.sleep(3)  # 等待运动完成
-                    
-                    # 阶段2: 运动到位置 0 (张开?)
-                    sdk.temp_move(position_mm=0, speed_pct=50, force_pct=25, accel=60, decel=60, trigger=True)
-                    time.sleep(3)  # 等待运动完成
-                    
-                print("\n循环结束，确认最终状态为张开 (位置 0)...")
-                # 再次发送指令确保最终状态为 0 (虽然循环最后一步已经是 0，但这保证了"最后要张开"的要求)
-                sdk.temp_move(position_mm=0, speed_pct=50, force_pct=25, accel=60, decel=60, trigger=True)
-                time.sleep(1)
-
-            except KeyboardInterrupt:
-                print("\n程序被用户中断。")
+                sdk = MotorController(port, slave_id, baudrate=115200, timeout=0.5)
+                pos = sdk.read_real_position()
+                print(f"[HIT] port={port}, slave_id={slave_id}, real_pos={pos}")
+                hits.append((port, slave_id, pos))
             except Exception as e:
-                print(f"执行过程中出错: {e}")
+                print(f"[MISS] port={port}, slave_id={slave_id}, err={e}")
             finally:
-                sdk.stop_monitoring()
-                print("程序已完成。")
+                if sdk is not None:
+                    try:
+                        sdk.instrument.serial.close()
+                    except Exception:
+                        pass
+
+    print("\n扫描完成。")
+    if hits:
+        print("可通信组合如下:")
+        for port, slave_id, pos in hits:
+            print(f"  - {port}, slave_id={slave_id}, real_pos={pos}")
+    else:
+        print("未找到任何可通信组合。")
