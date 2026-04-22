@@ -1,223 +1,189 @@
-# 基础示例
+# RM_Skills — 机械臂技能框架
 
 ## 1. 项目介绍
 
-本项目是一个使用睿尔曼Python开发包完成工程完成机械臂连接、机械臂版本获取、API版本获取、movej运动、moveL运动、moveC运动、关闭连接。
+本项目是一个面向睿尔曼机械臂的**技能录制与执行框架**，支持：
+
+- 通过拖动示教录制相对路点（waypoints）
+- 同步录制两只外置伺服夹爪（CTAG2F90D）的状态
+- 将录制好的技能一键回放，含路点运动与双夹爪开闭控制
+- 夹爪控制基于 Modbus RTU / RS-485，通过 `grasp_resource` SDK 独立驱动，与机械臂通信完全解耦
 
 ## 2. 代码结构
 
 ```
-RMDemo_SimpleProcess/
+RM_Skills/
 │
-├── README.md        <- 项目的核心文档
-├── requirements.txt    <- 项目的依赖列表
-├── setup.py        <- 项目的安装脚本
+├── README.md               <- 项目说明文档
+├── requirements.txt        <- 依赖列表
+├── setup.py                <- 安装脚本
 │
-├── src/          <- 项目的源代码
-│  ├── main.py       <- 程序的主入口
-│  └── core/        <- 核心功能或业务逻辑代码
-│    └── demo_simple_process.py      <- 完成机械臂连接、机械臂版本获取、API版本获取、movej运动、moveL运动、moveC运动、关闭连接的示例。
-└── Robotic_Arm/      <- 睿尔曼机械臂二次开发包
+├── src/                    <- 源代码
+│   ├── get_skill.py        <- 技能录制入口
+│   ├── execute_skill.py    <- 技能执行入口
+│   └── core/
+│       ├── get_skill.py    <- 录制核心（路点 + 双夹爪状态采集）
+│       ├── skills.py       <- 技能注册表 + SkillExecutor 执行引擎
+│       ├── dual_gripper.py <- 双夹爪适配层（Modbus RTU SDK 封装）
+│       ├── demo_project.py <- 机械臂连接封装（RobotArmController）
+│       └── demo_simple_process.py
+│
+├── grasp_resource/         <- 夹爪相关资料与 SDK
+│   ├── sdk/
+│   │   └── changingtek_p_rtu_Servo.py  <- 夹爪 Modbus RTU Python SDK
+│   ├── ROS/                <- 夹爪 ROS 可视化包
+│   └── *.pdf               <- 硬件与协议手册
+│
+└── src/Robotic_Arm/        <- 睿尔曼机械臂二次开发包
 ```
 
-## 3.项目下载
+## 3. 项目下载
 
-通过链接下载 `RM_API2` 到本地：[开发包下载](https://github.com/RealManRobot/RM_API2.git)，进入`RM_API2\Demo\RMDemo_Python`目录，可找到RMDemo_SimpleProcess。
+```bash
+git clone https://github.com/RealManRobot/RM_API2.git
+```
 
 ## 4. 环境配置
 
-在Windows和Linux环境下运行时需要的环境和依赖项：
-
-| 项目         | Linux     | Windows   |
-| :--          | :--       | :--       |
-| 系统架构     | x86架构   | -         |
-| python       | 3.9以上   | 3.9以上   |
-| 特定依赖     | -         | -         |
-
-### Linux环境配置
-
-   1. 参考[python官网-linux](https://www.python.org/downloads/source/)下载安装python3.9。
-
-   2. 进入项目目录后打开终端运行以下指令安装依赖：
+| 项目       | Linux（推荐）| Windows |
+| :--        | :--          | :--     |
+| 系统架构   | x86 / ARM    | x86     |
+| Python     | 3.10 以上    | 3.10 以上 |
+| 夹爪依赖   | minimalmodbus, pyserial | 同左 |
 
 ```bash
 pip install -r requirements.txt
+# 夹爪额外依赖（若 requirements.txt 未包含）
+pip install minimalmodbus pyserial
 ```
 
-### Windows环境配置
-
-   1. 参考[python官网-Windows](https://www.python.org/downloads/windows/)下载安装python3.9。
-
-   2. 进入项目目录后打开终端运行以下指令安装依赖：
+Linux 下若出现串口权限问题：
 
 ```bash
-pip install -r requirements.txt
+sudo chmod 666 /dev/ttyUSB1
+sudo chmod 666 /dev/ttyUSB2
 ```
 
 ## 5. 注意事项
 
-该Demo以RM65-B型号机械臂为例，请根据实际情况修改代码中的数据。
+- 机械臂 IP 地址默认为 `169.254.128.19`，请按实际情况修改 `src/core/get_skill.py` 和 `src/execute_skill.py` 中的 `ROBOT_IP`。
+- 夹爪串口默认为 `/dev/ttyUSB1`（夹爪 1）和 `/dev/ttyUSB2`（夹爪 2），在同一串口配置文件的顶部常量处修改。
+- **夹爪驱动严禁使用 `src/Robotic_Arm/` 目录下的任何夹爪接口**，统一通过 `src/core/dual_gripper.py` 调用 `grasp_resource/sdk/changingtek_p_rtu_Servo.py`。
+- 技能中路点位置单位为**米**，姿态单位为**弧度**，均为相对于基准位姿的偏移量。
+- 夹爪位置值（`gripper_positions`）单位与 `MotorController.read_real_position()` 返回值一致，需根据实际机构标定（示例中全开=0，全闭≈9000）。
 
 ## 6. 使用指南
 
-### 1. 快速运行
+### 6.1 录制技能（get_skill）
 
-按照以下步骤快速运行代码：
+1. **修改配置**：打开 `src/core/get_skill.py`，确认以下常量：
 
-1. **配置机械臂IP地址**：打开 `demo_simple_process.py` 文件，在 `main` 函数中修改 `RobotArmController` 类的初始化参数为当前机械臂的IP地址，默认IP地址为 `"192.168.1.18"`。
+   ```python
+   ROBOT_IP      = "169.254.128.19"  # 机械臂 IP
+   GRIPPER_PORT1 = "/dev/ttyUSB1"    # 夹爪 1 串口（无夹爪设为 None）
+   GRIPPER_PORT2 = "/dev/ttyUSB2"    # 夹爪 2 串口（无夹爪设为 None）
+   ```
 
-    ```python
-    # Create a robot arm controller instance and connect to the robot arm
-    robot_controller = RobotArmController("192.168.1.18", 8080, 3)
-    ```
+2. **运行录制**：
 
-2. **命令行运行**：在终端进入 `RMDemo_SimpleProcess` 目录，输入以下命令运行Python脚本：
+   ```bash
+   python src/get_skill.py
+   ```
 
-    ```bash
-    python ./src/main.py
-    ```
-   
-3. **运行结果**：在终端中可以看到机械臂的运行状态。
+3. **操作说明**：
 
-运行脚本后，输出结果如下所示：
+   | 按键 | 功能 |
+   | :-- | :-- |
+   | `Enter` | 保存当前路点（同时记录双夹爪位置） |
+   | `r + Enter` | 重置基准点为当前位姿 |
+   | `d + Enter` | 删除最后一个路点 |
+   | `q + Enter` | 退出并打印完整 `waypoints` 与 `gripper_positions` |
 
+4. **录制输出示例**：
+
+   ```
+   "waypoints": [
+       [0.0000, 0.0000, 0.0500, 0.0000, 0.0000, 0.0000],  # 路点 1
+       [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],  # 路点 2
+   ],
+   "gripper_positions": {
+       0: [9000, 9000],  # 路点 1 夹爪状态
+       1: [0, 0],        # 路点 2 夹爪状态
+   },
+   ```
+
+   将输出内容粘贴到 `src/core/skills.py` 的 `SKILL_REGISTRY` 中即可注册新技能。
+
+### 6.2 执行技能（execute_skill）
+
+1. **修改配置**：打开 `src/execute_skill.py`，设置目标技能和机械臂参数：
+
+   ```python
+   GRIPPER_PORT1   = "/dev/ttyUSB1"
+   GRIPPER_PORT2   = "/dev/ttyUSB2"
+   SKILL_NAME      = "set_kettle"        # 技能名称（需已在注册表中）
+   AFFORDANCE_POSE = [0.0900, 0.3763, -0.1825, 3.0800, 0.1120, -1.8970]
+   ```
+
+2. **运行执行**：
+
+   ```bash
+   python src/execute_skill.py
+   ```
+
+3. **执行逻辑**：
+   - 机械臂依次运动到每个路点（相对于 `AFFORDANCE_POSE` 的绝对位姿）
+   - 到达路点后，若该路点索引存在于 `gripper_positions`，则向双夹爪下发目标位置并等待到位
+   - 任一夹爪通信失败或超时，立即中止整个技能
+
+### 6.3 注册新技能
+
+在 `src/core/skills.py` 的 `SKILL_REGISTRY` 中添加条目：
+
+```python
+SKILL_REGISTRY = {
+    "my_skill": {
+        "name": "我的技能",
+        "description": "简要描述",
+        "speed": 20,
+        "waypoints": [
+            [dx1, dy1, dz1, drx1, dry1, drz1],
+            [dx2, dy2, dz2, drx2, dry2, drz2],
+        ],
+        # 可选：仅在指定路点索引触发双夹爪动作
+        "gripper_positions": {
+            0: [9000, 9000],  # 路点 1 到达后闭合双夹爪
+            1: [0, 0],        # 路点 2 到达后张开双夹爪
+        },
+    },
+}
 ```
-current api version:  0.2.9
 
-Successfully connected to the robot arm: 1
+`gripper_positions` 是可选字段：省略时跳过夹爪控制（纯运动技能完全兼容）。
 
-API Version:  0.2.9 
+### 6.4 双夹爪 API 速查
 
-================== Arm Software Information ==================
-Arm Model:  RM65-6FI
-Algorithm Library Version:  V1.3.9
-Control Layer Software Version:  V1.5.3
-Dynamics Version:  2
-Planning Layer Software Version:  V1.5.3
-==============================================================
+```python
+from src.core.dual_gripper import DualGripper, DualGripperConfig
 
-movej motion succeeded
+cfg = DualGripperConfig(
+    port1="/dev/ttyUSB1",
+    port2="/dev/ttyUSB2",
+    speed_pct=50,         # 速度百分比
+    force_pct=25,         # 夹紧力百分比
+    reach_timeout=5.0,    # 到位超时（秒）
+)
+dg = DualGripper(cfg)
+dg.connect()
 
-movej_p motion succeeded
+g1, g2 = dg.get_positions()          # 读取双夹爪当前位置
+ok = dg.set_positions(9000, 9000)     # 闭合双夹爪（阻塞等待到位）
+ok = dg.set_positions(0, 0)           # 张开双夹爪
+state = dg.get_full_state()           # 读取位置/速度/电流
 
-movel motion succeeded
-
-movej_p motion succeeded
-
-movec motion succeeded
-
-Successfully disconnected from the robot arm
+dg.disconnect()
 ```
-
-### 2. 代码说明
-
-下面是 `demo_simple_process.py` 文件的主要功能：
-- **定义各型号机械臂参数字典**
-    ```python
-    arm_models_to_points = {  
-        "RM_65": [  
-            [0, 20, 70, 0, 90, 0],
-            [0.3, 0, 0.3, 3.14, 0, 0],
-            [0.2, 0, 0.3, 3.14, 0, 0],
-            [0.3, 0, 0.3, 3.14, 0, 0],
-            [0.2, 0.05, 0.3, 3.14, 0, 0],
-            [0.2, -0.05, 0.3, 3.14, 0, 0] ,
-        ],  
-        "RM_75": [  
-            [0, 20, 0, 70, 0, 90, 0],
-            [0.297557, 0, 0.337061, 3.142, 0, 3.142],
-            [0.097557, 0, 0.337061, 3.142, 0, 3.142],
-            [0.297557, 0, 0.337061, 3.142, 0, 3.142],
-            [0.257557, -0.08, 0.337061, 3.142, 0, 3.142],
-            [0.257557, 0.08, 0.337061, 3.142, 0, 3.142],
-        ], 
-        "RML_63": [  
-            [0, 20, 70, 0, 90, 0],
-            [0.448968, 0, 0.345083, 3.142, 0, 3.142],
-            [0.248968, 0, 0.345083, 3.142, 0, 3.142],
-            [0.448968, 0, 0.345083, 3.142, 0, 3.142],
-            [0.408968, -0.1, 0.345083, 3.142, 0, 3.142],
-            [0.408968, 0.1, 0.345083, 3.142, 0, 3.142]  ,
-        ], 
-        "ECO_65": [  
-            [0, 20, 70, 0, -90, 0],
-            [0.352925, -0.058880, 0.327320, 3.141, 0, -1.57],
-            [0.152925, -0.058880, 0.327320, 3.141, 0, -1.57],
-            [0.352925, -0.058880, 0.327320, 3.141, 0, -1.57],
-            [0.302925, -0.158880, 0.327320, 3.141, 0, -1.57],
-            [0.302925, 0.058880, 0.327320, 3.141, 0, -1.57],
-        ],
-        "GEN_72": [  
-            [0, 0, 0, -90, 0, 0, 0],
-            [0.1, 0, 0.4, 3.14, 0, 0],
-            [0.3, 0, 0.4, 3.14, 0, 0],
-            [0.3595, 0, 0.4265, 3.142, 0, 0],
-            [0.3595, 0.03, 0.4265, 3.142, 0, 0],
-            [0.3595, 0.03, 0.4665, 3.142, 0, 0],
-        ],
-        "ECO_63": [  
-            [0, 20, 70, 0, -90, 0],
-            [0.544228, -0.058900, 0.468274, 3.142, 0, -1.571],
-            [0.344228, -0.058900, 0.468274, 3.142, 0, -1.571],
-            [0.544228, -0.058900, 0.468274, 3.142, 0, -1.571],
-            [0.504228, -0.108900, 0.468274, 3.142, 0, -1.571],
-            [0.504228, -0.008900, 0.468274, 3.142, 0, -1.571],
-        ],
-    } 
-    ```
-
-- **连接机械臂**
-
-    ```python
-    robot_controller = RobotArmController("192.168.1.18", 8080, 3)
-    ```
-    连接到指定IP和端口的机械臂。
-
-- **获取API版本**
-
-    ```python
-    print("\nAPI Version: ", rm_api_version(), "\n")
-    ```
-    获取并显示API版本。
-
-- **获取机械臂软件信息**
-
-    ```python
-    robot_controller.get_arm_software_info()
-    ```
-    获取并显示机械臂的基本信息，包括产品版本、算法库版本、控制层软件版本、动力学版本和规划层软件版本。
-
-- **执行movej运动**
-
-    ```python
-    robot_controller.movej(joint_6dof)
-    ```
-
-- **执行movej_p运动**
-
-    ```python
-    robot_controller.movej_p(points[1])
-    ```
-
-- **执行movel运动**
-
-    ```python
-    robot_controller.movel(points[2])
-    ```
-
-- **执行movec运动**
-
-    ```python
-    robot_controller.movec(points[4], points[5], loop=2)
-    ```
-
-- **断开机械臂连接**
-
-    ```python
-    robot_controller.disconnect()
-    ```
-
 
 ## 7. 许可证信息
 
-- 本项目遵循MIT许可证。
+- 本项目遵循 MIT 许可证。

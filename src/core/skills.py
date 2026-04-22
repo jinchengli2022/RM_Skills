@@ -20,27 +20,34 @@ import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.Robotic_Arm.rm_robot_interface import *
+from src.core.dual_gripper import DualGripper  # noqa: E402  仅用于类型注解与实例持有
 
 
 # =============================================================================
 # 技能注册表 —— 所有技能在此定义
 # =============================================================================
 # 每个技能包含:
-#   "name":        技能显示名称
-#   "description": 技能描述
-#   "speed":       默认执行速度 (1-100)
-#   "waypoints":   相对偏移点列表，每个点为 [dx, dy, dz, drx, dry, drz]
-#                  位置单位: 米，姿态单位: 弧度
-#                  所有偏移都相对于 **执行技能时的起始位姿**
+#   "name":           技能显示名称
+#   "description":    技能描述
+#   "speed":          默认执行速度 (1-100)
+#   "ref_pose":       (可选) 参考位姿 [x,y,z,rx,ry,rz]，所有 waypoints 相对于此位姿
+#   "affordance_pose": (可选) 可承受点位姿 [x,y,z,rx,ry,rz]，备选基准点（优先级低于 ref_pose）
+#   "waypoints":      相对偏移点列表，每个点为 [dx, dy, dz, drx, dry, drz]
+#                     位置单位: 米，姿态单位: 弧度
+#                     所有偏移都相对于 **执行技能时的起始位姿（基准点）**
 #
 # 占位符说明:
 #   A, B, C... 等大写字母标注的数值为占位值，需根据实际场景标定后替换
+#
+# 基准点优先级: 外部 ref_pose > 外部 affordance_pose > 技能 ref_pose > 技能 affordance_pose > 当前位姿
 # =============================================================================
 
 SKILL_REGISTRY = {
     "close_light": {
         "name": "关灯",
         "speed": 20,
+        "ref_pose": [0.090005, 0.376255, -0.182519, 3.08, 0.112, -1.897],
+        "affordance_pose": [0.090005, 0.376255, -0.182519, 3.08, 0.112, -1.897],
         "waypoints": [
             [0.0019, -0.0931, 0.0253, 1.0350, -0.0620, 1.0350],
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -118,18 +125,36 @@ SKILL_REGISTRY = {
         "waypoints": [
             # A: 前伸到接收位置
             [0.20, 0.0, 0.0, 0.0, 0.0, 0.0],
-            # >>> 夹爪闭合
             # B: 收回
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             # C: 下降放置
             [0.0, 0.0, -0.10, 0.0, 0.0, 0.0],
-            # >>> 夹爪松开
             # D: 抬起复位
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ],
-        "actions": {
-            0: "gripper_close",
-            2: "gripper_open",
+        # gripper_positions: 仅在记录了夹爪值的路点索引下发命令
+        # 示例（需根据实际标定值替换）：
+        # "gripper_positions": {
+        #     0: [9000, 9000],   # 路点 1 到位后双夹爪闭合
+        #     2: [0, 0],         # 路点 3 到位后双夹爪张开
+        # },
+    },
+
+    # ── 示例：带双夹爪动作的技能（新格式） ────────────────────────────
+    "example_dual_gripper": {
+        "name": "双夹爪示例",
+        "description": "演示 gripper_positions 格式：在路点 0 闭合、路点 2 张开",
+        "speed": 20,
+        "waypoints": [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0,  0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+        # 键为路点索引（0 起始），值为 [夹爪1位置, 夹爪2位置]
+        # 位置单位与 MotorController.read_real_position() 一致
+        "gripper_positions": {
+            0: [9000, 9000],   # 路点 1 到位后双夹爪闭合
+            2: [0, 0],         # 路点 3 到位后双夹爪张开
         },
     },
 
@@ -205,11 +230,14 @@ class SkillExecutor:
 
     Args:
         robot_controller: RobotArmController 实例（来自 demo_project.py）
+        dual_gripper: DualGripper 实例（可选）。提供时按技能的 gripper_positions
+                      在对应路点下发双夹爪命令；未提供时跳过夹爪控制。
     """
 
-    def __init__(self, robot_controller):
+    def __init__(self, robot_controller, dual_gripper: "DualGripper | None" = None):
         self.rc = robot_controller
         self.robot = robot_controller.robot
+        self.dual_gripper = dual_gripper
 
     # ----- 公开接口 -----
 
@@ -224,22 +252,23 @@ class SkillExecutor:
             return None
         return {
             "name": skill["name"],
-            "description": skill["description"],
+            "description": skill.get("description", ""),
             "speed": skill["speed"],
             "num_waypoints": len(skill["waypoints"]),
         }
 
-    def execute(self, skill_name: str, affordance_pose: list[float] = None, speed: int = None, block: int = 1) -> int:
+    def execute(self, skill_name: str, ref_pose: list[float] = None, affordance_pose: list[float] = None, speed: int = None, block: int = 1) -> int:
         """
         执行指定技能。
 
         机械臂先运动到第一个路点（绝对位姿），再依次执行所有路点。
-        所有路点均为相对于 affordance_pose 的偏移量。
+        所有路点均为相对于基准位姿的偏移量。
 
         Args:
             skill_name (str): 技能名称，必须在 SKILL_REGISTRY 中已注册。
+            ref_pose (list[float], optional): 外部参考位姿 [x,y,z,rx,ry,rz]（最高优先级）。
             affordance_pose (list[float], optional): 技能基准位姿 [x,y,z,rx,ry,rz]。
-                若不提供，则自动读取当前机械臂末端绝对位姿作为基准。
+                若两者均不提供，则优先读取技能内 ref_pose，其次 affordance_pose，最后当前位姿。
             speed (int, optional): 覆盖技能默认速度，范围 1-100。
             block (int): 阻塞模式，1=等待运动完成，0=非阻塞。
 
@@ -256,23 +285,39 @@ class SkillExecutor:
         v = speed if speed is not None else skill["speed"]
         waypoints = skill["waypoints"]
         actions = skill.get("actions", {})
+        gripper_positions = skill.get("gripper_positions", {})
 
         print(f"\n{'='*60}")
         print(f"  执行技能: {skill['name']} ({skill_name})")
-        print(f"  描述: {skill['description']}")
+        print(f"  描述: {skill.get('description', '')}")
         print(f"  速度: {v}%  |  路点数: {len(waypoints)}")
+        if gripper_positions:
+            print(f"  夹爪动作路点: {sorted(gripper_positions.keys())}")
         print(f"{'='*60}")
 
-        # 2. 确定基准位姿：优先使用传入的 affordance_pose，否则读取当前位姿
-        if affordance_pose is not None:
+        # 2. 确定基准位姿：优先级为 外部ref_pose > 外部affordance_pose > 技能ref_pose > 技能affordance_pose > 当前位姿
+        if ref_pose is not None:
+            base_pose = ref_pose
+            print(f"  基准位姿（外部 ref_pose）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
+        elif affordance_pose is not None:
             base_pose = affordance_pose
-            print(f"  基准位姿（外部传入）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
+            print(f"  基准位姿（外部 affordance_pose）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
+        elif skill.get("ref_pose") is not None:
+            base_pose = list(skill["ref_pose"])
+            print(f"  基准位姿（技能 ref_pose）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
+        elif skill.get("affordance_pose") is not None:
+            base_pose = list(skill["affordance_pose"])
+            print(f"  基准位姿（技能 affordance_pose）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
         else:
             base_pose = self._get_current_pose()
             if base_pose is None:
                 print("[SkillExecutor] ❌ 无法获取当前机械臂位姿，中止执行")
                 return -2
             print(f"  基准位姿（当前位姿）: [{', '.join(f'{x:.4f}' for x in base_pose)}]")
+
+        if not isinstance(base_pose, list) or len(base_pose) != 6:
+            print(f"[SkillExecutor] ❌ 基准位姿格式错误: {base_pose}")
+            return -2
 
         if not waypoints:
             print("[SkillExecutor] ⚠️  该技能没有任何路点，跳过执行")
@@ -291,6 +336,11 @@ class SkillExecutor:
         print(f"    ✓ 到达起始路点")
         if 0 in actions:
             self._execute_action(actions[0])
+        if gripper_positions and 0 in gripper_positions:
+            ret = self._execute_gripper(gripper_positions[0])
+            if not ret:
+                print("  ❌ 夹爪执行失败，中止技能")
+                return -10
 
         # 4. 依次执行后续路点
         for i, offset in enumerate(waypoints[1:], start=1):
@@ -307,9 +357,16 @@ class SkillExecutor:
 
             print(f"    ✓ 到达")
 
-            # 执行该路点关联的特殊动作
+            # 执行该路点关联的特殊动作（兼容旧技能）
             if i in actions:
                 self._execute_action(actions[i])
+
+            # 执行双夹爪命令
+            if gripper_positions and i in gripper_positions:
+                ret = self._execute_gripper(gripper_positions[i])
+                if not ret:
+                    print("  ❌ 夹爪执行失败，中止技能")
+                    return -(i + 10)
 
         print(f"\n  ✅ 技能 '{skill['name']}' 执行完成")
         print(f"{'='*60}\n")
@@ -334,22 +391,38 @@ class SkillExecutor:
         """将相对偏移叠加到基准位姿上，返回新的绝对位姿"""
         return [base_pose[i] + offset[i] for i in range(6)]
 
+    def _execute_gripper(self, positions: list) -> bool:
+        """通过 DualGripper 适配层下发双夹爪位置命令。
+
+        Args:
+            positions: [g1_target, g2_target]
+
+        Returns:
+            True 表示成功，False 表示失败（调用方应中止技能）。
+        """
+        if self.dual_gripper is None:
+            print("    [夹爪] ⚠️  未配置 DualGripper，跳过夹爪命令")
+            return True  # 无夹爪时不视为失败，避免阻断纯位姿技能
+        if len(positions) != 2:
+            print(f"    [夹爪] ⚠️  positions 格式错误: {positions}，期望 [g1, g2]")
+            return False
+        g1, g2 = int(positions[0]), int(positions[1])
+        print(f"    ⚙ 执行双夹爪: g1={g1}, g2={g2}")
+        ok = self.dual_gripper.set_positions(g1, g2, wait=True)
+        if not ok:
+            print(f"    [夹爪] ❌ 双夹爪未能到位 (目标 g1={g1}, g2={g2})")
+        return ok
+
     def _execute_action(self, action: str):
-        """执行路点关联的特殊动作（如夹爪开合）"""
-        if action == "gripper_close":
-            print("    ⚙ 执行: 夹爪闭合")
-            ret = self.robot.rm_set_gripper_position(200, False, 0)
-            if ret != 0:
-                print(f"    [警告] 夹爪闭合指令发送失败, 错误码: {ret}")
-            time.sleep(2.0)
+        """执行路点关联的旧式特殊动作标记（仅保留日志，不再调用 src 夹爪驱动）。
 
-        elif action == "gripper_open":
-            print("    ⚙ 执行: 夹爪张开")
-            ret = self.robot.rm_set_gripper_position(1000, False, 0)
-            if ret != 0:
-                print(f"    [警告] 夹爪张开指令发送失败, 错误码: {ret}")
-            time.sleep(2.0)
-
+        Note:
+            旧式 actions 字典中的夹爪动作已由 gripper_positions 替代。
+            此方法保留是为了兼容已有技能中的非夹爪动作扩展点。
+        """
+        if action in ("gripper_close", "gripper_open"):
+            print(f"    [actions] ⚠️  旧式夹爪动作 '{action}' 已弃用，"
+                  "请改用 gripper_positions 字段。")
         else:
             print(f"    [警告] 未知动作类型: {action}")
 
