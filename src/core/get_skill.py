@@ -23,12 +23,14 @@ import sys
 import os
 import time
 import threading
+import socket
+import json
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.Robotic_Arm.rm_robot_interface import *
 from src.core.demo_project import RobotArmController
-from src.core.dual_gripper import DualGripper, DualGripperConfig
+from src.core.zhixing import GripperController
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 ROBOT_IP   = "169.254.128.19"
@@ -43,11 +45,14 @@ AFFORDANCE_POSE = [0.090005, 0.376255, -0.182519, 3.08, 0.112, -1.897]
 # r + Enter 的重置策略
 # True: 重置到 AFFORDANCE_POSE
 # False: 重置到当前机械臂位姿
-RESET_BASE_TO_AFFORDANCE_ON_R = True
+RESET_BASE_TO_AFFORDANCE_ON_R = False
 
-# 双夹爪串口配置（不使用夹爪时设为 None 跳过初始化）
-GRIPPER_PORT1 = "/dev/ttyUSB1"   # 夹爪 1 串口
-GRIPPER_PORT2 = "/dev/ttyUSB2"   # 夹爪 2 串口
+# 单夹爪 TCP 配置（基于 zhixing.py 的 GripperController）
+# 不使用夹爪时将 GRIPPER_HOST 设为 None
+GRIPPER_HOST = "169.254.128.18"
+GRIPPER_TCP_PORT = 8080
+GRIPPER_MODBUS_PORT = 1
+GRIPPER_DEVICE_ID = 1
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -80,7 +85,7 @@ def clear_line():
 
 
 def print_saved_waypoints(affordance_pose: list[float], waypoints: list[list[float]], gripper_positions: dict):
-    """打印技能片段：affordance_pose、waypoints 及双夹爪位置字典"""
+    """打印技能片段：affordance_pose、waypoints 及单夹爪位置字典"""
     print("\n" + "=" * 60)
     print("  已保存的技能片段（可直接粘贴到 skills.py）:")
     print("=" * 60)
@@ -91,14 +96,96 @@ def print_saved_waypoints(affordance_pose: list[float], waypoints: list[list[flo
         print(f"      {format_waypoint(wp)}{comma}  # 路点 {i+1}")
     print("  ],")
     if gripper_positions:
-        print("  \"gripper_positions\": {")
+        print("  \"gripper_positions（仅为示例，需根据实际标定值替换）\": {")
         indices = sorted(gripper_positions.keys())
         for j, idx in enumerate(indices):
-            g1, g2 = gripper_positions[idx]
+            g = gripper_positions[idx]
             comma = "," if j < len(indices) - 1 else ""
-            print(f"      {idx}: [{g1}, {g2}]{comma}  # 路点 {idx+1} 夹爪状态")
+            print(f"      {idx}: {g}{comma}  # 路点 {idx+1} 夹爪状态")
         print("  },")
     print("=" * 60 + "\n")
+
+
+class SingleGripperViaZhixing:
+    """使用 zhixing.py 的 GripperController 实现单夹爪位置读取。"""
+
+    def __init__(self, host: str, tcp_port: int, modbus_port: int, device_id: int):
+        self.host = host
+        self.tcp_port = tcp_port
+        self.modbus_port = modbus_port
+        self.device_id = device_id
+        self._sock: socket.socket | None = None
+        self._gripper: GripperController | None = None
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.connect((self.host, self.tcp_port))
+
+        setup_cmd = {
+            "command": "set_modbus_mode",
+            "port": self.modbus_port,
+            "baudrate": 115200,
+            "timeout": 3,
+        }
+        self._send(setup_cmd)
+
+        self._gripper = GripperController(self._sock, device_id=self.device_id, port=self.modbus_port)
+
+    def disconnect(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            finally:
+                self._sock = None
+                self._gripper = None
+
+    def get_position(self) -> int:
+        if self._gripper is None:
+            raise RuntimeError("夹爪未连接，请先调用 connect()")
+        return self._read_position(self._gripper)
+
+    def _read_position(self, controller: GripperController) -> int:
+        # 读取 0x0102/0x0103 (十进制 258/259) 作为 32 位位置值
+        cmd = {
+            "command": "read_holding_registers",
+            "port": controller.port,
+            "address": 258,
+            "num": 2,
+            "device": controller.device_id,
+        }
+        resp = self._send(cmd)
+        regs = self._extract_regs(resp)
+        if len(regs) >= 2:
+            return ((int(regs[0]) & 0xFFFF) << 16) | (int(regs[1]) & 0xFFFF)
+        if len(regs) == 1:
+            return int(regs[0])
+        raise RuntimeError(f"夹爪位置响应无寄存器数据: {resp}")
+
+    def _send(self, command: dict) -> str:
+        if self._sock is None:
+            raise RuntimeError("夹爪 socket 未连接")
+        payload = json.dumps(command) + "\n"
+        with self._lock:
+            self._sock.sendall(payload.encode("utf-8"))
+            return self._sock.recv(1024).decode()
+
+    @staticmethod
+    def _extract_regs(resp_text: str) -> list[int]:
+        try:
+            data = json.loads(resp_text.strip())
+        except Exception:
+            return []
+
+        for key in ("data", "registers", "values"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [int(v) for v in val]
+
+        val = data.get("data")
+        if isinstance(val, int):
+            return [int(val)]
+        return []
 
 
 def main():
@@ -111,17 +198,21 @@ def main():
     rc = RobotArmController(ROBOT_IP, ROBOT_PORT, level=3)
     robot = rc.robot
 
-    # ── 连接双夹爪（可选，失败时继续录制但跳过夹爪采集）──
-    dual_gripper: DualGripper | None = None
-    if GRIPPER_PORT1 and GRIPPER_PORT2:
+    # ── 连接单夹爪（可选，失败时继续录制但跳过夹爪采集）──
+    dual_gripper: SingleGripperViaZhixing | None = None
+    if GRIPPER_HOST:
         try:
-            cfg = DualGripperConfig(port1=GRIPPER_PORT1, port2=GRIPPER_PORT2)
-            dual_gripper = DualGripper(cfg)
+            dual_gripper = SingleGripperViaZhixing(
+                host=GRIPPER_HOST,
+                tcp_port=GRIPPER_TCP_PORT,
+                modbus_port=GRIPPER_MODBUS_PORT,
+                device_id=GRIPPER_DEVICE_ID,
+            )
             dual_gripper.connect()
-            print("  ✓ 双夹爪已连接，将同步采集夹爪状态")
+            print("  ✓ 单夹爪已连接（zhixing TCP 模式），将同步采集夹爪状态")
         except Exception as e:
             dual_gripper = None
-            print(f"  ⚠️  双夹爪初始化失败，跳过夹爪采集: {e}")
+            print(f"  ⚠️  单夹爪初始化失败，跳过夹爪采集: {e}")
 
 
     # while True:
@@ -145,10 +236,10 @@ def main():
     print(f"\n{'─' * 60}")
 
     saved_waypoints: list[list[float]] = []
-    gripper_positions: dict[int, list[int]] = {}   # {waypoint_index: [g1, g2]}
+    gripper_positions: dict[int, int] = {}   # {waypoint_index: gripper_position}
     stop_flag = threading.Event()
     last_offset = [0.0] * 6
-    last_gripper = [0, 0]   # 刷新线程写入，主线程读取（GIL 保护 int 赋值足够）
+    last_gripper = 0   # 刷新线程写入，主线程读取（GIL 保护 int 赋值足够）
 
     # ── 实时刷新线程 ──
     def refresh_loop():
@@ -165,9 +256,9 @@ def main():
                 g_str = ""
                 if dual_gripper is not None:
                     try:
-                        g1, g2 = dual_gripper.get_positions()
-                        last_gripper = [g1, g2]
-                        g_str = f"  夹爪=[{g1},{g2}]"
+                        g = dual_gripper.get_position()
+                        last_gripper = g
+                        g_str = f"  夹爪=[{g}]"
                     except Exception:
                         g_str = "  夹爪=[?]"
 
@@ -225,9 +316,9 @@ def main():
                 saved_waypoints.append(wp)
                 g_info = ""
                 if dual_gripper is not None:
-                    gv = last_gripper[:]
+                    gv = int(last_gripper)
                     gripper_positions[idx] = gv
-                    g_info = f"  夹爪=[{gv[0]},{gv[1]}]"
+                    g_info = f"  夹爪=[{gv}]"
                 clear_line()
                 print(f"\n  ✓ 路点 {idx+1} 已保存: {format_waypoint(wp)}{g_info}")
 

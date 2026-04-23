@@ -108,16 +108,16 @@ class GripperController:
         self._send_command(pos_cmd)
 
 
-    def open_gripper(self, delay=2.0):
-        """打开夹爪（固定数据格式）"""
-        self.logger.info("Opening gripper...")
-        self._send_gripper_command([0, 0, 0, 0])  # 固定打开数据
-        time.sleep(delay)
-
     def close_gripper(self, delay=2.0):
         """关闭夹爪（固定数据格式）"""
         self.logger.info("Closing gripper...")
-        self._send_gripper_command([0, 0, 46, 224])  # 固定关闭数据
+        self._send_gripper_command([0, 0, 0, 0])  # 固定关闭`数据
+        time.sleep(delay)
+
+    def open_gripper(self, delay=2.0):
+        """打开夹爪（固定数据格式）"""
+        self.logger.info("Opening gripper...")
+        self._send_gripper_command([0, 0, 46, 224])  # 固定打开数据
         time.sleep(delay)
 
 
@@ -130,7 +130,7 @@ class GripperController:
 
 if __name__ == "__main__":
     # 配置连接参数
-    HOST = '192.168.1.18'
+    HOST = '169.254.128.19'
     PORT = 8080
     DEVICE_PORT = 1
     DEVICE_ID = 1
@@ -162,29 +162,30 @@ if __name__ == "__main__":
         client.sendall(json.dumps(setup_cmd).encode('utf-8'))
         print("Modbus mode setup response:", client.recv(1024).decode())
 
+        # 写力寄存器
+        gripper.set_gipper_force(100, 1)
+        time.sleep(1)
+        setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
+        client.sendall(json.dumps(setup_cmd).encode('utf-8'))
+        print("Modbus mode setup response:", client.recv(1024).decode())
         for i in range(50):
 
-            #set gripper force
-            gripper.set_gipper_force(20, 1)
-            time.sleep(1)
-            #read gripper force
-            setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
-            client.sendall(json.dumps(setup_cmd).encode('utf-8'))
-            print("Modbus mode setup response:", client.recv(1024).decode())
+            
             # 执行开合测试
-            gripper.open_gripper(delay=3.0)  # 打开夹爪
+            gripper.open_gripper()  # 打开夹爪
             time.sleep(1)
             gripper.close_gripper()          # 关闭夹爪
+            time.sleep(1)
             #设置夹爪力值
-            gripper.set_gipper_force(100, 1)
-            time.sleep(1)
-            #read gripper force
-            setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
-            client.sendall(json.dumps(setup_cmd).encode('utf-8'))
-            print("Modbus mode setup response:", client.recv(1024).decode())
-            gripper.open_gripper(delay=3.0)  # 打开夹爪
-            time.sleep(1)
-            gripper.close_gripper()          # 关闭夹爪
+            # gripper.set_gipper_force(100, 1)
+            # time.sleep(1)
+            # #read gripper force
+            # setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
+            # client.sendall(json.dumps(setup_cmd).encode('utf-8'))
+            # print("Modbus mode setup response:", client.recv(1024).decode())
+            # gripper.open_gripper(delay=3.0)  # 打开夹爪
+            # time.sleep(1)
+            # gripper.close_gripper()          # 关闭夹爪
 
     except Exception as e:
         print(f"Error occurred: {str(e)}")
