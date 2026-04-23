@@ -13,12 +13,6 @@ from core.skills import execute_skill, SkillExecutor
 from core.demo_project import RobotArmController
 from core.zhixing import GripperController
 
-# ── 单夹爪 TCP 配置（基于 zhixing.py 的 GripperController）────────────────────
-# 不使用夹爪时将 GRIPPER_HOST 设为 None
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class SingleGripperViaZhixing:
     """适配 SkillExecutor 所需接口：connect/open_gripper/close_gripper/disconnect。"""
 
