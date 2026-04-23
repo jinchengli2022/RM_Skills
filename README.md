@@ -1,275 +1,201 @@
-# RM_Skills — 机械臂技能框架
+# RM_Skills
 
-## 1. 项目介绍
+面向睿尔曼机械臂（RM）的技能录制与执行项目，当前代码主流程是：
 
-本项目是一个面向睿尔曼机械臂的**技能录制与执行框架**，支持：
+1. 录制相对路点（可同时记录单夹爪状态）
+2. 将录制结果写入技能注册表
+3. 执行指定技能（机械臂运动 + 单夹爪开合）
 
-- 通过拖动示教录制相对路点（waypoints）
-- 同步录制两只外置伺服夹爪（CTAG2F90D）的状态
-- 将录制好的技能一键回放，含路点运动与双夹爪开闭控制
-- 夹爪控制基于 Modbus RTU / RS-485，通过 `grasp_resource` SDK 独立驱动，与机械臂通信完全解耦
+以下说明以当前仓库真实结构和代码为准。
 
-## 2. 代码结构
+## 目录结构（当前）
 
-```
+```text
 RM_Skills/
-│
-├── README.md                 <- 项目说明文档
-├── requirements.txt          <- 依赖列表
-├── setup.py                  <- 安装脚本
-├── diagnose_grippers.py      <- 夹爪连接诊断工具
-│
-├── src/                      <- 源代码
-│   ├── get_skill.py          <- 技能录制入口
-│   ├── execute_skill.py      <- 技能执行入口
-│   └── core/
-│       ├── get_skill.py      <- 录制核心（路点 + 双夹爪状态采集 + Affordance/ref_pose）
-│       ├── skills.py         <- 技能注册表 + SkillExecutor 执行引擎
-│       ├── dual_gripper.py   <- 双夹爪适配层（Modbus RTU SDK 封装）
-│       ├── demo_project.py   <- 机械臂连接封装（RobotArmController）
-│       └── demo_simple_process.py
-│
-├── grasp_resource/           <- 夹爪相关资料与 SDK
-│   ├── sdk/
-│   │   └── changingtek_p_rtu_Servo.py  <- 夹爪 Modbus RTU Python SDK
-│   ├── ROS/                  <- 夹爪 ROS 可视化包
-│   └── *.pdf                 <- 硬件与协议手册
-│
-└── src/Robotic_Arm/          <- 睿尔曼机械臂二次开发包
+├── README.md
+├── requirements.txt
+├── setup.py
+├── tmp.py
+└── src/
+    ├── execute_skill.py
+    ├── get_skill.py
+    ├── diagnose_grippers.py
+    ├── hand_eye_calibration.py
+    ├── core/
+    │   ├── demo_project.py
+    │   ├── get_skill.py
+    │   ├── skills.py
+    │   ├── web_gripper_control.py
+    │   └── zhixing.py
+    └── Robotic_Arm/
+        ├── rm_ctypes_wrap.py
+        └── rm_robot_interface.py
 ```
 
-## 3. 项目下载
+## 快速开始
 
-```bash
-git clone https://github.com/RealManRobot/RM_API2.git
-```
-
-## 4. 环境配置
-
-| 项目       | Linux（推荐）| Windows |
-| :--        | :--          | :--     |
-| 系统架构   | x86 / ARM    | x86     |
-| Python     | 3.10 以上    | 3.10 以上 |
-| 夹爪依赖   | minimalmodbus, pyserial | 同左 |
+建议在仓库根目录执行命令。
 
 ```bash
 pip install -r requirements.txt
-# 夹爪额外依赖（若 requirements.txt 未包含）
-pip install minimalmodbus pyserial
+python src/execute_skill.py
 ```
 
-Linux 下若出现串口权限问题：
+默认会连接：
 
-```bash
-sudo chmod 666 /dev/ttyUSB1
-sudo chmod 666 /dev/ttyUSB2
-```
+- 机械臂：`169.254.128.19:8080`
+- 技能名：`test`
+- 单夹爪 Modbus 端口：`1`
+- 单夹爪设备 ID：`1`
 
-## 5. 注意事项
+## 使用流程（重点）
 
-- 机械臂 IP 地址默认为 `169.254.128.19`，请按实际情况修改 `src/core/get_skill.py` 和 `src/execute_skill.py` 中的 `ROBOT_IP`。
-- 夹爪串口连接方式支持两种：**双独立串口**（模式A）或**单串口主从级联**（模式B）。不确定时，运行 `diagnose_grippers.py` 自动检测。
-- **夹爪驱动严禁使用 `src/Robotic_Arm/` 目录下的任何夹爪接口**，统一通过 `src/core/dual_gripper.py` 调用 `grasp_resource/sdk/changingtek_p_rtu_Servo.py`。
-- 技能中路点位置单位为**米**，姿态单位为**弧度**，均为相对于基准位姿的偏移量。
-- 夹爪位置值（`gripper_positions`）单位与 `MotorController.read_real_position()` 返回值一致，需根据实际机构标定（示例中全开=0，全闭≈9000）。
-- **基准位姿优先级**（从高到低）：外部 `ref_pose` 参数 > 外部 `affordance_pose` 参数 > 技能内 `ref_pose` > 技能内 `affordance_pose` > 当前机械臂位姿。
+## 1. 先改配置
 
-## 6. 使用指南
+### 1.1 执行技能配置
 
-### 6.1 录制技能（get_skill）
-
-1. **修改配置**：打开 `src/core/get_skill.py`，确认以下常量：
-
-   ```python
-   ROBOT_IP      = "169.254.128.19"  # 机械臂 IP
-   GRIPPER_PORT1 = "/dev/ttyUSB1"    # 夹爪 1 串口（无夹爪设为 None）
-   GRIPPER_PORT2 = "/dev/ttyUSB2"    # 夹爪 2 串口（无夹爪设为 None）
-   ```
-
-2. **运行录制**：
-
-   ```bash
-   python src/get_skill.py
-   ```
-
-3. **操作说明**：
-
-   | 按键 | 功能 |
-   | :-- | :-- |
-   | `Enter` | 保存当前路点（同时记录双夹爪位置） |
-   | `r + Enter` | 重置基准点为当前位姿 |
-   | `d + Enter` | 删除最后一个路点 |
-   | `q + Enter` | 退出并打印完整 `waypoints` 与 `gripper_positions` |
-
-4. **录制输出示例**：
-
-   ```
-   "affordance_pose": [0.0900, 0.3763, -0.1825, 3.0800, 0.1120, -1.8970],  # 基准点（可选）
-   "waypoints": [
-       [0.0000, 0.0000, 0.0500, 0.0000, 0.0000, 0.0000],  # 路点 1
-       [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],  # 路点 2
-   ],
-   "gripper_positions": {
-       0: [9000, 9000],  # 路点 1 夹爪状态
-       1: [0, 0],        # 路点 2 夹爪状态
-   },
-   ```
-
-   将输出内容粘贴到 `src/core/skills.py` 的 `SKILL_REGISTRY` 中即可注册新技能。
-
-### 6.2 执行技能（execute_skill）
-
-1. **修改配置**：打开 `src/execute_skill.py`，设置目标技能和机械臂参数：
-
-   ```python
-   GRIPPER_PORT1   = "/dev/ttyUSB1"
-   GRIPPER_PORT2   = "/dev/ttyUSB2"
-   SKILL_NAME      = "set_kettle"        # 技能名称（需已在注册表中）
-   ```
-
-2. **运行执行**（基准点由优先级确定）：
-
-   ```bash
-   # 使用技能内定义的 ref_pose 或 affordance_pose
-   python src/execute_skill.py
-   
-   # 或通过代码传入外部参数，覆盖技能内配置
-   # executor.execute(SKILL_NAME, ref_pose=[x, y, z, rx, ry, rz])
-   ```
-
-3. **基准点确定优先级**（从高到低）：
-   1. 外部传入的 `ref_pose` 参数
-   2. 外部传入的 `affordance_pose` 参数
-   3. 技能内定义的 `ref_pose`
-   4. 技能内定义的 `affordance_pose`
-   5. 当前机械臂末端位姿
-
-4. **执行逻辑**：
-   - 机械臂依次运动到每个路点（相对于确定的基准位姿的绝对位姿）
-   - 到达路点后，若该路点索引存在于 `gripper_positions`，则向双夹爪下发目标位置并等待到位
-   - 任一夹爪通信失败或超时，立即中止整个技能
-
-### 6.3 注册新技能
-
-在 `src/core/skills.py` 的 `SKILL_REGISTRY` 中添加条目：
+编辑 `src/execute_skill.py` 中 `__main__` 下的常量：
 
 ```python
-SKILL_REGISTRY = {
-    "my_skill": {
-        "name": "我的技能",
-        "description": "简要描述",
-        "speed": 20,
-        # 可选：基准点定义
-        "ref_pose": [x, y, z, rx, ry, rz],           # 推荐使用
-        # 可选：备选基准点（优先级低于 ref_pose）
-        "affordance_pose": [x, y, z, rx, ry, rz],
-        # 必须：路点定义
-        "waypoints": [
-            [dx1, dy1, dz1, drx1, dry1, drz1],
-            [dx2, dy2, dz2, drx2, dry2, drz2],
-        ],
-        # 可选：指定路点索引处的双夹爪动作
-        "gripper_positions": {
-            0: [9000, 9000],  # 路点 1 到达后闭合双夹爪
-            1: [0, 0],        # 路点 2 到达后张开双夹爪
-        },
+ROBOT_IP = "169.254.128.19"
+ROBOT_PORT = 8080
+SKILL_NAME = "test"
+GRIPPER_MODBUS_PORT = 1
+GRIPPER_DEVICE_ID = 1
+```
+
+### 1.2 录制技能配置
+
+编辑 `src/core/get_skill.py` 顶部常量：
+
+```python
+ROBOT_IP = "169.254.128.19"
+ROBOT_PORT = 8080
+
+AFFORDANCE_POSE = [0.090005, 0.376255, -0.182519, 3.08, 0.112, -1.897]
+RESET_BASE_TO_AFFORDANCE_ON_R = False
+
+GRIPPER_HOST = "169.254.128.18"  # 不采集夹爪可设为 None
+GRIPPER_TCP_PORT = 8080
+GRIPPER_MODBUS_PORT = 1
+GRIPPER_DEVICE_ID = 1
+```
+
+## 2. 录制技能点位
+
+执行：
+
+```bash
+python src/get_skill.py
+```
+
+按键说明：
+
+- 直接回车：保存当前路点（并尝试记录当前夹爪状态）
+- `r` + 回车：重置基准点
+- `d` + 回车：删除最后一个路点
+- `q` + 回车：退出并打印技能片段
+
+退出时会输出可复制内容，核心字段有：
+
+- `affordance_pose`
+- `waypoints`
+- `gripper_positions`
+
+注意：当前实现里 `gripper_positions` 的值是单个整数（单夹爪），不是双元素数组。
+
+## 3. 注册新技能
+
+把录制结果粘贴到 `src/core/skills.py` 的 `SKILL_REGISTRY`。
+
+最小可用模板：
+
+```python
+"my_skill": {
+    "name": "我的技能",
+    "description": "可选描述",
+    "speed": 25,
+    "affordance_pose": [x, y, z, rx, ry, rz],
+    "waypoints": [
+        [dx1, dy1, dz1, drx1, dry1, drz1],
+        [dx2, dy2, dz2, drx2, dry2, drz2],
+    ],
+    "gripper_positions": {
+        0: 1,
+        1: 0,
     },
-}
+},
 ```
 
-**字段说明**：
-- `ref_pose` 和 `affordance_pose` 都是可选的基准点定义，`ref_pose` 优先级更高
-- `gripper_positions` 是可选字段：省略时跳过夹爪控制（纯运动技能完全兼容）
-- 所有字段省略时，执行器使用当前机械臂位姿作为基准点
+字段说明：
 
-### 6.4 双夹爪 API 速查
+- `waypoints` 必填，单位是米/弧度
+- `gripper_positions` 可选，键是路点索引（从 0 开始）
+- 夹爪执行逻辑：`<=0` 视为打开，`>0` 视为关闭
 
-```python
-from src.core.dual_gripper import DualGripper, DualGripperConfig
+## 4. 执行技能
 
-cfg = DualGripperConfig(
-    port1="/dev/ttyUSB1",
-    port2="/dev/ttyUSB2",
-    speed_pct=50,         # 速度百分比
-    force_pct=25,         # 夹紧力百分比
-    reach_timeout=5.0,    # 到位超时（秒）
-)
-dg = DualGripper(cfg)
-dg.connect()
-
-g1, g2 = dg.get_positions()          # 读取双夹爪当前位置
-ok = dg.set_positions(9000, 9000)     # 闭合双夹爪（阻塞等待到位）
-ok = dg.set_positions(0, 0)           # 张开双夹爪
-state = dg.get_full_state()           # 读取位置/速度/电流
-
-dg.disconnect()
-```
-
-### 6.5 诊断夹爪连接（diagnose_grippers）
-
-若不确定夹爪的连接方式（双独立串口 vs 单串口主从级联），可使用诊断工具自动检测：
+执行：
 
 ```bash
-python diagnose_grippers.py
+python src/execute_skill.py
 ```
 
-**诊断流程**：
+执行器基准位姿优先级（高到低）：
 
-| 步骤 | 操作 | 说明 |
-| :-- | :-- | :-- |
-| 1 | 扫描可用串口 | 列举系统中所有 USB 串口 |
-| 2 | 模式 A | 尝试双独立串口（最常见） |
-| - | 模式 B | 尝试单串口主从级联 |
-| - | 模式 C | 检测单夹爪（故障排查） |
-| 3 | 输出配置 | 打印推荐的常量配置 |
+1. 外部传入 `ref_pose`
+2. 外部传入 `affordance_pose`
+3. 技能内 `ref_pose`
+4. 技能内 `affordance_pose`
+5. 当前机械臂位姿
 
-**输出示例**：
-
-```
-✓ 诊断成功！
-
-  推荐配置（dual_independent）:
-    GRIPPER_PORT1 = '/dev/ttyUSB1'
-    GRIPPER_PORT2 = '/dev/ttyUSB2'
-    SLAVE_ID_1 = 1
-    SLAVE_ID_2 = 1
-```
-
-将诊断结果配置到 `src/execute_skill.py` 和 `src/core/get_skill.py` 的常量部分即可。
-
-## 7. API 参考
-
-### 7.1 SkillExecutor.execute() 方法
+如果你要在代码里显式覆盖基准位姿，可参考 `src/execute_skill.py` 中：
 
 ```python
-def execute(
-    self,
-    skill_name: str,
-    ref_pose: list[float] = None,          # 优先级最高
-    affordance_pose: list[float] = None,   # 优先级次高
-    speed: int = None,
-    block: int = 1
-) -> int:
-    """
-    执行指定技能。
-    
-    Args:
-        skill_name: 技能名称
-        ref_pose: 外部基准点（可覆盖技能内配置）
-        affordance_pose: 备选外部基准点
-        speed: 运动速度百分比（1-100）
-        block: 1=阻塞等待完成，0=非阻塞
-    
-    Returns:
-        0: 执行成功
-        负数: 执行失败（负值表示失败步骤号）
-    """
+executor.execute(SKILL_NAME, affordance_pose=AFFORDANCE_POSE, ref_pose=REF_POSE)
 ```
 
-### 7.2 DualGripper 类
+## 5. 手眼标定（RealSense）
 
-见 **6.4 双夹爪 API 速查** 部分。
+脚本：`src/hand_eye_calibration.py`
 
-## 8. 许可证信息
+示例：
 
-- 本项目遵循 MIT 许可证。
+```bash
+python src/hand_eye_calibration.py \
+  --robot-ip 169.254.128.19 \
+  --board-cols 8 \
+  --board-rows 6 \
+  --square-size-mm 25 \
+  --min-samples 10 \
+  --output-dir handeye_output
+```
+
+运行后：
+
+- `s` 采样
+- `c` 计算标定结果
+- `q` 退出
+
+结果保存到：`handeye_output/handeye_result.json`
+
+## 常见问题
+
+## 1. `git push` 提示 Password authentication is not supported
+
+GitHub 已禁用账号密码推送，请改用 PAT（Personal Access Token）或 SSH。
+
+## 2. 录制时提示夹爪初始化失败
+
+先把 `GRIPPER_HOST` 设为 `None`，只录制机械臂路点，后续再排查夹爪网络连通性与参数。
+
+## 3. `diagnose_grippers.py` 无法运行
+
+当前 `src/diagnose_grippers.py` 依赖 `src/core/dual_gripper.py`，但该文件不在当前目录结构中。若需要该诊断流程，请先补齐对应模块或调整脚本依赖。
+
+## 开发说明
+
+- 入口脚本：`src/get_skill.py`、`src/execute_skill.py`
+- 核心执行器：`src/core/skills.py` 中 `SkillExecutor`
+- 机械臂通信封装：`src/core/demo_project.py`
+- 单夹爪控制：`src/core/zhixing.py`
