@@ -130,7 +130,7 @@ class GripperController:
 
 if __name__ == "__main__":
     # 配置连接参数
-    HOST = '169.254.128.19'
+    HOST = '169.254.128.18'
     PORT = 8080
     DEVICE_PORT = 1
     DEVICE_ID = 1

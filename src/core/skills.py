@@ -16,6 +16,7 @@
 import sys
 import os
 import time
+import threading
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
@@ -44,18 +45,32 @@ from src.Robotic_Arm.rm_robot_interface import *
 # 0为开，1为闭合
 
 SKILL_REGISTRY = {
+    "goto_affordance": {
+        "name": "到达Affordance",
+        "description": "直接移动到 affordance_pose，不叠加任何位置或姿态偏移",
+        "speed": 20,
+        "waypoints": [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+    },
+    "gripper_positions": {
+            0: 0,  # 路点 1 夹爪状态（单夹爪位置）
+            1: 1
+    },
+
     "test": {
         "name": "测试",
         "speed": 25,
-        "affordance_pose": [0.2785, 0.3931, 0.2808, 0.3220, -0.1100, -1.6670],
+        "affordance_pose":   [-0.2532, 0.3638, 0.0810, -2.2960, -0.0170, 1.6140],
+        "ref_pose":   [-0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
         "waypoints": [
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.1086, -0.1375, 0.0947, -0.1900, 0.3770, -0.3350],  # 路点 1
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.10, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.05, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.10, 0.0, 0.0, 0.0],
         ],
         "gripper_positions": {
-            0: 0,  # 路点 1 夹爪状态（单夹爪位置）
-            2: 1
+            0: 1,  # 路点 1 夹爪状态（单夹爪位置）
         },
     },
 
@@ -346,7 +361,7 @@ class SkillExecutor:
         print(f"\n  ➤ 前往起始路点 1/{len(waypoints)}: 偏移 {waypoints[0]}")
         print(f"    目标位姿: [{', '.join(f'{x:.4f}' for x in first_target)}]")
 
-        ret = self.robot.rm_movel(first_target, v, 0, 0, block)
+        ret = self._movel_with_monitor(first_target, v, block)
         if ret != 0:
             print(f"  ❌ 前往起始路点失败, 错误码: {ret}")
             return -1
@@ -369,7 +384,7 @@ class SkillExecutor:
             print(f"\n  ▶ 路点 {i+1}/{len(waypoints)}: 偏移 {offset}")
             print(f"    目标位姿: [{', '.join(f'{x:.4f}' for x in target_pose)}]")
 
-            ret = self.robot.rm_movel(target_pose, v, 0, 0, block)
+            ret = self._movel_with_monitor(target_pose, v, block)
 
             if ret != 0:
                 print(f"  ❌ 路点 {i+1} 运动失败, 错误码: {ret}")
@@ -405,6 +420,29 @@ class SkillExecutor:
             print(f"  [警告] 获取到的位姿数据异常: {pose}")
             return None
         return list(pose)
+
+    def _start_pose_monitor(self, interval: float = 0.15) -> threading.Event:
+        """启动后台线程实时打印末端位姿，返回用于停止的 Event。"""
+        stop_event = threading.Event()
+
+        def _loop():
+            while not stop_event.is_set():
+                pose = self._get_current_pose()
+                if pose is not None:
+                    ps = ", ".join(f"{v:8.4f}" for v in pose)
+                    print(f"    [末端位姿] [{ps}]")
+                stop_event.wait(interval)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        return stop_event
+
+    def _movel_with_monitor(self, target: list[float], speed: int, block: int) -> int:
+        """执行 rm_movel 并在阻塞期间实时输出末端位姿。"""
+        stop_event = self._start_pose_monitor()
+        ret = self.robot.rm_movel(target, speed, 0, 0, block)
+        stop_event.set()
+        return ret
 
     @staticmethod
     def _apply_offset(base_pose: list[float], offset: list[float]) -> list[float]:

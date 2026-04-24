@@ -33,14 +33,14 @@ from src.core.demo_project import RobotArmController
 from src.core.zhixing import GripperController
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
-ROBOT_IP   = "169.254.128.19"
+ROBOT_IP   = "169.254.128.18"
 ROBOT_PORT = 8080
 REFRESH_HZ = 10          # 实时刷新频率（次/秒）
 PRINT_DIGITS = 4         # 输出小数位数
 
 # Affordance 点绝对位姿（技能基准点）
 # 录制输出时会以 "affordance_pose" 字段保留在技能定义里
-AFFORDANCE_POSE = [0.090005, 0.376255, -0.182519, 3.08, 0.112, -1.897]
+AFFORDANCE_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # r + Enter 的重置策略
 # True: 重置到 AFFORDANCE_POSE
@@ -49,7 +49,7 @@ RESET_BASE_TO_AFFORDANCE_ON_R = False
 
 # 单夹爪 TCP 配置（基于 zhixing.py 的 GripperController）
 # 不使用夹爪时将 GRIPPER_HOST 设为 None
-GRIPPER_HOST = "169.254.128.18"
+GRIPPER_HOST = "169.254.128.19"
 GRIPPER_TCP_PORT = 8080
 GRIPPER_MODBUS_PORT = 1
 GRIPPER_DEVICE_ID = 1
