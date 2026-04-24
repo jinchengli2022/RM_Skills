@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -26,8 +28,11 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     o3d = None
 
-from core.demo_project import RobotArmController
-from align.reconstruct import capture_single_frame, list_realsense_devices
+# Add the repository root to sys.path so imports are stable when running scripts/*.py from repo root.
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.core.demo_project import RobotArmController
+from src.align.reconstruct import capture_single_frame, list_realsense_devices
 
 try:
     from src.Robotic_Arm.rm_ctypes_wrap import rm_matrix_t

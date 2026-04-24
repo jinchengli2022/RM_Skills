@@ -22,9 +22,9 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 # Add the parent directory of src to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from core.skills import execute_skill, SkillExecutor
-from core.demo_project import RobotArmController
-from core.zhixing import GripperController
+from src.core.skills import execute_skill, SkillExecutor
+from src.core.demo_project import RobotArmController
+from src.core.zhixing import GripperController
 from src.Robotic_Arm.rm_ctypes_wrap import rm_matrix_t
 from src.align.test_reconstruct_and_register import reconstruct_and_register_grasp_pose
 
