@@ -22,3 +22,6 @@ Thumbs.db
 *.log
 data/
 output/
+src/outputs/
+handeye_output/
+outputs/
