@@ -2,7 +2,7 @@
 机械臂技能模块 (Robot Arm Skills)
 
 通过任务名称驱动机械臂执行预定义的相对轨迹。
-每个技能由一组相对于当前位姿的偏移点组成，机械臂依次经过这些点完成任务。
+每个技能由一组相对于 affordance 局部坐标系的相对位姿组成，机械臂依次经过这些点完成任务。
 
 使用示例:
     from core.skills import SkillExecutor
@@ -18,9 +18,12 @@ import os
 import time
 import threading
 
+import numpy as np
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.Robotic_Arm.rm_robot_interface import *
+from src.Robotic_Arm.rm_ctypes_wrap import rm_matrix_t
 
 
 # =============================================================================
@@ -32,9 +35,9 @@ from src.Robotic_Arm.rm_robot_interface import *
 #   "speed":          默认执行速度 (1-100)
 #   "ref_pose":       (可选) 参考位姿 [x,y,z,rx,ry,rz]，所有 waypoints 相对于此位姿
 #   "affordance_pose": (可选) 可承受点位姿 [x,y,z,rx,ry,rz]，备选基准点（优先级低于 ref_pose）
-#   "waypoints":      相对偏移点列表，每个点为 [dx, dy, dz, drx, dry, drz]
+#   "waypoints":      affordance 局部坐标系下的相对位姿列表，每个点为 [dx, dy, dz, drx, dry, drz]
 #                     位置单位: 米，姿态单位: 弧度
-#                     所有偏移都相对于 **执行技能时的起始位姿（基准点）**
+#                     所有 waypoints 都会作为局部变换右乘到 affordance_pose 上
 #
 # 占位符说明:
 #   A, B, C... 等大写字母标注的数值为占位值，需根据实际场景标定后替换
@@ -47,16 +50,19 @@ from src.Robotic_Arm.rm_robot_interface import *
 SKILL_REGISTRY = {
     "goto_affordance": {
         "name": "到达Affordance",
-        "description": "直接移动到 affordance_pose，不叠加任何位置或姿态偏移",
+        "description": "先沿 affordance 局部 -Z 方向退后到预备位，再回到 affordance_pose",
         "speed": 20,
         "waypoints": [
+            [0.0, 0.0, -0.1, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.1, 0.1, 0.0, 0.0, 0.0, 0.0],
+            [0.1, 0.1, 0.0, 0.0, 0.0, 0.5236],
         ],
-    },
-    "gripper_positions": {
+        "gripper_positions": {
             0: 0,  # 路点 1 夹爪状态（单夹爪位置）
             1: 1
+        },
     },
 
     "test": {
@@ -293,12 +299,13 @@ class SkillExecutor:
         执行指定技能。
 
         机械臂先运动到第一个路点（绝对位姿），再依次执行所有路点。
-        所有路点均为相对于基准位姿的偏移量。
+        所有路点均为相对于 affordance 局部坐标系的相对位姿。
 
         Args:
             skill_name (str): 技能名称，必须在 SKILL_REGISTRY 中已注册。
             ref_pose (list[float], optional): 外部参考位姿 [x,y,z,rx,ry,rz]（最高优先级）。
-            affordance_pose (list[float], optional): 技能基准位姿 [x,y,z,rx,ry,rz]。
+            affordance_pose (list[float], optional): 技能基准位姿 [x,y,z,rx,ry,rz]，
+                同时定义 affordance 局部坐标系的原点与朝向。
                 若两者均不提供，则优先读取技能内 ref_pose，其次 affordance_pose，最后当前位姿。
             speed (int, optional): 覆盖技能默认速度，范围 1-100。
             block (int): 阻塞模式，1=等待运动完成，0=非阻塞。
@@ -357,8 +364,8 @@ class SkillExecutor:
 
 
         # 3. 先运动到第一个路点（movel 绝对位姿）
-        first_target = self._apply_offset(base_pose, waypoints[0])
-        print(f"\n  ➤ 前往起始路点 1/{len(waypoints)}: 偏移 {waypoints[0]}")
+        first_target = self._apply_local_waypoint(base_pose, waypoints[0])
+        print(f"\n  ➤ 前往起始路点 1/{len(waypoints)}: affordance局部相对位姿 {waypoints[0]}")
         print(f"    目标位姿: [{', '.join(f'{x:.4f}' for x in first_target)}]")
 
         ret = self._movel_with_monitor(first_target, v, block)
@@ -379,9 +386,9 @@ class SkillExecutor:
 
         # 4. 依次执行后续路点
         for i, offset in enumerate(waypoints[1:], start=1):
-            target_pose = self._apply_offset(base_pose, offset)
+            target_pose = self._apply_local_waypoint(base_pose, offset)
 
-            print(f"\n  ▶ 路点 {i+1}/{len(waypoints)}: 偏移 {offset}")
+            print(f"\n  ▶ 路点 {i+1}/{len(waypoints)}: affordance局部相对位姿 {offset}")
             print(f"    目标位姿: [{', '.join(f'{x:.4f}' for x in target_pose)}]")
 
             ret = self._movel_with_monitor(target_pose, v, block)
@@ -444,10 +451,24 @@ class SkillExecutor:
         stop_event.set()
         return ret
 
-    @staticmethod
-    def _apply_offset(base_pose: list[float], offset: list[float]) -> list[float]:
-        """将相对偏移叠加到基准位姿上，返回新的绝对位姿"""
-        return [base_pose[i] + offset[i] for i in range(6)]
+    def _pose_to_matrix(self, pose: list[float]) -> np.ndarray:
+        """将 RM pose 转换为 4x4 齐次变换矩阵。"""
+        rm_matrix = self.robot.rm_algo_pos2matrix(pose)
+        values = [float(v) for v in rm_matrix.data]
+        return np.array(values, dtype=np.float64).reshape(4, 4)
+
+    def _matrix_to_pose(self, matrix: np.ndarray) -> list[float]:
+        """将 4x4 齐次变换矩阵转换为 RM pose。"""
+        rm_mat = rm_matrix_t(data=matrix.tolist())
+        pose = self.robot.rm_algo_matrix2pos(rm_mat, 1)
+        return [float(v) for v in pose]
+
+    def _apply_local_waypoint(self, base_pose: list[float], waypoint: list[float]) -> list[float]:
+        """将 affordance 局部相对位姿应用到基准位姿上，返回新的绝对位姿。"""
+        base_transform = self._pose_to_matrix(base_pose)
+        waypoint_transform = self._pose_to_matrix(waypoint)
+        target_transform = base_transform @ waypoint_transform
+        return self._matrix_to_pose(target_transform)
 
     def _execute_gripper(self, positions) -> bool:
         """直接调用 zhixing.py 的 open_gripper/close_gripper。"""
@@ -504,7 +525,7 @@ def register_skill(name: str, display_name: str, description: str,
         name: 技能唯一标识名（英文，如 "pick_up"）
         display_name: 技能显示名称（如 "拾取物品"）
         description: 技能描述
-        waypoints: 相对偏移路点列表 [[dx,dy,dz,drx,dry,drz], ...]
+        waypoints: affordance 局部坐标系下的相对位姿列表 [[dx,dy,dz,drx,dry,drz], ...]
         speed: 默认速度百分比
         actions: 路点索引到动作的映射，如 {0: "gripper_close", 2: "gripper_open"}
     """
@@ -533,7 +554,7 @@ def visualize_skill(skill_name: str, base_pose: list[float] = None):
     将指定技能的所有路点及夹爪朝向可视化为 3D 图。
 
     图中内容:
-      - 灰色星号 (*)      : 基准点（原点，即执行技能时机械臂的起始位置）
+      - 灰色星号 (*)      : affordance 原点（执行技能时的局部坐标系原点）
       - 彩色圆点 (●)      : 各路点位置，颜色随序号渐变（蓝→红）
       - 彩色箭头           : 夹爪 Z 轴朝向（由欧拉角 rx/ry/rz 计算的旋转矩阵第三列）
       - 数字标签            : 路点序号
@@ -542,8 +563,8 @@ def visualize_skill(skill_name: str, base_pose: list[float] = None):
 
     Args:
         skill_name (str): 技能名称，必须在 SKILL_REGISTRY 中已注册。
-        base_pose (list[float], optional): 基准位姿 [x,y,z,rx,ry,rz]，
-            默认全零（相对坐标原点）。
+        base_pose (list[float], optional): affordance 基准位姿 [x,y,z,rx,ry,rz]，
+            默认全零（局部坐标原点）。
     """
     try:
         import matplotlib.pyplot as plt
@@ -565,14 +586,9 @@ def visualize_skill(skill_name: str, base_pose: list[float] = None):
     waypoints = skill["waypoints"]
     actions   = skill.get("actions", {})
 
-    # --- Calculate absolute coordinates ---
-    def apply_offset(base, offset):
-        return [base[i] + offset[i] for i in range(6)]
-
-    abs_poses = [apply_offset(base_pose, wp) for wp in waypoints]
+    # --- Local waypoint transform composition ---
     origin = base_pose[:]
 
-    # --- Euler Angles -> Rotation Matrix (ZYX Intrinsic) ---
     def euler_to_rot(rx, ry, rz):
         """ZYX order: R = Rz @ Ry @ Rx"""
         cx, sx = np.cos(rx), np.sin(rx)
@@ -589,6 +605,43 @@ def visualize_skill(skill_name: str, base_pose: list[float] = None):
                        [0,   0,  1]])
         return Rz @ Ry @ Rx
 
+    def rot_to_euler(rotation):
+        """ZYX intrinsic inverse: rotation = Rz @ Ry @ Rx."""
+        sy = float(np.sqrt(rotation[0, 0] ** 2 + rotation[1, 0] ** 2))
+        singular = sy < 1e-8
+        if not singular:
+            rx = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
+            ry = float(np.arctan2(-rotation[2, 0], sy))
+            rz = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+        else:
+            rx = float(np.arctan2(-rotation[1, 2], rotation[1, 1]))
+            ry = float(np.arctan2(-rotation[2, 0], sy))
+            rz = 0.0
+        return rx, ry, rz
+
+    def pose_to_transform(pose):
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = euler_to_rot(pose[3], pose[4], pose[5])
+        transform[:3, 3] = np.asarray(pose[:3], dtype=np.float64)
+        return transform
+
+    def transform_to_pose(transform):
+        rx, ry, rz = rot_to_euler(transform[:3, :3])
+        translation = transform[:3, 3]
+        return [
+            float(translation[0]),
+            float(translation[1]),
+            float(translation[2]),
+            rx,
+            ry,
+            rz,
+        ]
+
+    def apply_local_waypoint(base, waypoint):
+        return transform_to_pose(pose_to_transform(base) @ pose_to_transform(waypoint))
+
+    abs_poses = [apply_local_waypoint(base_pose, wp) for wp in waypoints]
+
     # --- Color Mapping: Sequence 0 (Blue) -> n-1 (Red) ---
     cmap = plt.cm.coolwarm
     n = len(abs_poses)
@@ -604,8 +657,8 @@ def visualize_skill(skill_name: str, base_pose: list[float] = None):
     ax = fig.add_subplot(111, projection="3d")
 
     # Base Origin
-    ax.scatter(*origin[:3], marker="*", s=220, c="grey", zorder=5, label="Base Point (Start)")
-    ax.text(origin[0], origin[1], origin[2], "  Origin", fontsize=8, color="grey")
+    ax.scatter(*origin[:3], marker="*", s=220, c="grey", zorder=5, label="Affordance Origin")
+    ax.text(origin[0], origin[1], origin[2], "  Affordance", fontsize=8, color="grey")
 
     # Trajectory Lines (Movement order)
     traj_xyz = [origin[:3]] + [p[:3] for p in abs_poses]

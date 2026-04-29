@@ -12,9 +12,9 @@
     - 手动拖动机械臂到目标位置（需先开启拖动示教模式）
     - 实时终端输出相对偏移，格式为 [dx, dy, dz, drx, dry, drz]
     - 按 Enter 键保存当前位置为一个路点
-    - 按 q + Enter 退出并打印完整的 waypoints 列表
-    - 按 r + Enter 重置基准点为当前位置
-    - 按 d + Enter 删除最后一个已保存的路点
+    - 按 q 键退出并打印完整的 waypoints 列表
+    - 按 r 键重置基准点为当前位置
+    - 按 d 键删除最后一个已保存的路点
 """
 
 import sys
@@ -27,7 +27,6 @@ from src.core.get_skill import *
 
 if __name__ == "__main__":
     main()
-
 
 
 

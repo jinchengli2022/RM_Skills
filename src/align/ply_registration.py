@@ -487,7 +487,8 @@ def register_point_clouds(
     voxel_size: float = 0.01,
     icp_distance_factor: float = 2.0,
     no_vis: bool = True,
-) -> dict[str, object] | None:
+    return_registration_summary: bool = False,
+) -> dict[str, object] | tuple[dict[str, object] | None, RegistrationSummary] | None:
     """Register source PLY to target PLY using RANSAC + ICP.
 
     Saves aligned matplotlib preview images next to the target file.
@@ -585,10 +586,13 @@ def register_point_clouds(
             source_grasp=source_grasp,
         )
 
-    if grasp_label is None:
-        return None
+    transformed_label = None
+    if grasp_label is not None:
+        transformed_label = transform_grasp_label(grasp_label, icp_result.transformation)
 
-    return transform_grasp_label(grasp_label, icp_result.transformation)
+    if return_registration_summary:
+        return transformed_label, icp_result
+    return transformed_label
 
 
 def main() -> None:

@@ -1,7 +1,7 @@
 """
 技能点位采集工具 (Skill Waypoint Recorder)
 
-启动后记录基准位姿，然后实时输出当前位置相对于基准的偏移量，
+启动后记录 affordance 基准位姿，然后实时输出当前位置相对于该基准的局部相对位姿，
 格式与 skills.py 的 waypoints 完全一致，可直接复制粘贴使用。
 
 用法:
@@ -10,11 +10,11 @@
 操作说明:
     - 启动后以 Affordance 点作为基准点（可配置）
     - 手动拖动机械臂到目标位置（需先开启拖动示教模式）
-    - 实时终端输出相对偏移，格式为 [dx, dy, dz, drx, dry, drz]
+    - 实时终端输出 affordance 局部坐标系下的相对位姿，格式为 [dx, dy, dz, drx, dry, drz]
     - 按 Enter 键保存当前位置为一个路点
-    - 按 q + Enter 退出并打印完整的 waypoints 列表
-    - 按 r + Enter 重置基准点为 Affordance 点（可配置）
-    - 按 d + Enter 删除最后一个已保存的路点
+    - 按 q 键退出并打印完整的 waypoints 列表
+    - 按 r 键重置基准点为 Affordance 点（可配置）
+    - 按 d 键删除最后一个已保存的路点
 """
 
 from __future__ import annotations
@@ -25,10 +25,16 @@ import time
 import threading
 import socket
 import json
+import select
+import termios
+import tty
+
+import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.Robotic_Arm.rm_robot_interface import *
+from src.Robotic_Arm.rm_ctypes_wrap import rm_matrix_t
 from src.core.demo_project import RobotArmController
 from src.core.zhixing import GripperController
 
@@ -38,11 +44,12 @@ ROBOT_PORT = 8080
 REFRESH_HZ = 10          # 实时刷新频率（次/秒）
 PRINT_DIGITS = 4         # 输出小数位数
 
-# Affordance 点绝对位姿（技能基准点）
-# 录制输出时会以 "affordance_pose" 字段保留在技能定义里
-AFFORDANCE_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# Affordance 点绝对位姿（技能基准点）。
+# 设为 None 时，启动后使用当前末端位姿作为 affordance 原点与局部坐标轴。
+# 录制输出时会以 "affordance_pose" 字段保留在技能定义里。
+AFFORDANCE_POSE = None
 
-# r + Enter 的重置策略
+# r 键的重置策略
 # True: 重置到 AFFORDANCE_POSE
 # False: 重置到当前机械臂位姿
 RESET_BASE_TO_AFFORDANCE_ON_R = False
@@ -67,9 +74,27 @@ def get_current_pose(robot):
     return list(pose)
 
 
-def calc_offset(base: list[float], current: list[float]) -> list[float]:
-    """计算相对于基准的偏移量"""
-    return [round(current[i] - base[i], PRINT_DIGITS) for i in range(6)]
+def pose_to_matrix(robot, pose: list[float]) -> np.ndarray:
+    """将 RM pose 转换为 4x4 齐次变换矩阵。"""
+    rm_matrix = robot.rm_algo_pos2matrix(pose)
+    values = [float(v) for v in rm_matrix.data]
+    return np.array(values, dtype=np.float64).reshape(4, 4)
+
+
+def matrix_to_pose(robot, matrix: np.ndarray) -> list[float]:
+    """将 4x4 齐次变换矩阵转换为 RM pose。"""
+    rm_mat = rm_matrix_t(data=matrix.tolist())
+    pose = robot.rm_algo_matrix2pos(rm_mat, 1)
+    return [float(v) for v in pose]
+
+
+def calc_local_offset(robot, base_pose: list[float], current_pose: list[float]) -> list[float]:
+    """计算当前位姿相对于 affordance 基准位姿的局部相对位姿。"""
+    base_transform = pose_to_matrix(robot, base_pose)
+    current_transform = pose_to_matrix(robot, current_pose)
+    local_transform = np.linalg.inv(base_transform) @ current_transform
+    local_pose = matrix_to_pose(robot, local_transform)
+    return [round(value, PRINT_DIGITS) for value in local_pose]
 
 
 def format_waypoint(offset: list[float]) -> str:
@@ -84,8 +109,62 @@ def clear_line():
     sys.stdout.flush()
 
 
+class SingleKeyReader:
+    """在终端中读取单键输入；非 TTY 时回退到逐行输入。"""
+
+    def __init__(self):
+        self._fd: int | None = None
+        self._old_settings = None
+        self._is_tty = False
+
+    def __enter__(self) -> "SingleKeyReader":
+        self._is_tty = sys.stdin.isatty()
+        if self._is_tty:
+            self._fd = sys.stdin.fileno()
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._is_tty and self._fd is not None and self._old_settings is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+
+    def read_key(self, stop_event: threading.Event) -> str | None:
+        """阻塞等待单键；若收到 stop_event 则返回 None。"""
+        if not self._is_tty:
+            try:
+                line = input()
+            except EOFError:
+                return None
+            if line == "":
+                return "\n"
+            line = line.strip().lower()
+            return line[:1] if line else "\n"
+
+        assert self._fd is not None
+        while not stop_event.is_set():
+            ready, _, _ = select.select([self._fd], [], [], 0.1)
+            if not ready:
+                continue
+
+            ch = sys.stdin.read(1)
+            if ch in ("\r", "\n"):
+                return "\n"
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch == "\x1b":
+                while True:
+                    ready, _, _ = select.select([self._fd], [], [], 0)
+                    if not ready:
+                        break
+                    sys.stdin.read(1)
+                continue
+            return ch.lower()
+        return None
+
+
 def print_saved_waypoints(affordance_pose: list[float], waypoints: list[list[float]], gripper_positions: dict):
-    """打印技能片段：affordance_pose、waypoints 及单夹爪位置字典"""
+    """打印技能片段：affordance_pose、局部坐标系下的 waypoints 及单夹爪位置字典。"""
     print("\n" + "=" * 60)
     print("  已保存的技能片段（可直接粘贴到 skills.py）:")
     print("=" * 60)
@@ -93,7 +172,7 @@ def print_saved_waypoints(affordance_pose: list[float], waypoints: list[list[flo
     print("  \"waypoints\": [")
     for i, wp in enumerate(waypoints):
         comma = "," if i < len(waypoints) - 1 else ""
-        print(f"      {format_waypoint(wp)}{comma}  # 路点 {i+1}")
+        print(f"      {format_waypoint(wp)}{comma}  # 路点 {i+1}（affordance 局部相对位姿）")
     print("  ],")
     if gripper_positions:
         print("  \"gripper_positions（仅为示例，需根据实际标定值替换）\": {")
@@ -226,13 +305,13 @@ def main():
         return
     affordance_pose = base_pose[:]
 
-    print(f"\n✓ 基准位姿已记录（Affordance 点）:")
+    print(f"\n✓ Affordance 基准位姿已记录:")
     print(f"  {format_waypoint(base_pose)}")
     print(f"\n操作说明:")
-    print(f"  Enter      → 保存当前偏移为路点")
-    print(f"  r + Enter  → 重置基准点（按配置：Affordance/当前位姿）")
-    print(f"  d + Enter  → 删除最后一个路点")
-    print(f"  q + Enter  → 退出并输出 affordance_pose + waypoints")
+    print(f"  Enter  → 保存当前局部相对位姿为路点")
+    print(f"  r      → 重置 affordance 原点与局部坐标轴（按配置：Affordance/当前位姿）")
+    print(f"  d      → 删除最后一个路点")
+    print(f"  q      → 退出并输出 affordance_pose + waypoints")
     print(f"\n{'─' * 60}")
 
     saved_waypoints: list[list[float]] = []
@@ -247,7 +326,7 @@ def main():
         while not stop_flag.is_set():
             pose = get_current_pose(robot)
             if pose is not None:
-                offset = calc_offset(base_pose, pose)
+                offset = calc_local_offset(robot, base_pose, pose)
                 last_offset = offset
                 wp_str = format_waypoint(offset)
                 count = len(saved_waypoints)
@@ -264,7 +343,7 @@ def main():
 
                 clear_line()
                 sys.stdout.write(
-                    f"  实时偏移: {wp_str}{g_str}  "
+                    f"  实时相对位姿(affordance局部): {wp_str}{g_str}  "
                     f"[已保存 {count} 个路点]  "
                     f"| Enter保存 r重置 d删除 q退出"
                 )
@@ -276,51 +355,55 @@ def main():
 
     # ── 主循环：处理键盘输入 ──
     try:
-        while True:
-            cmd = input()   # 阻塞等待用户输入
+        with SingleKeyReader() as key_reader:
+            while True:
+                cmd = key_reader.read_key(stop_flag)
+                if cmd is None:
+                    stop_flag.set()
+                    break
 
-            if cmd.strip().lower() == "q":
-                stop_flag.set()
-                break
+                if cmd == "q":
+                    stop_flag.set()
+                    break
 
-            elif cmd.strip().lower() == "r":
-                new_base = None
-                if RESET_BASE_TO_AFFORDANCE_ON_R and AFFORDANCE_POSE is not None:
-                    new_base = list(AFFORDANCE_POSE)
-                else:
-                    new_base = get_current_pose(robot)
-                if new_base is not None:
-                    base_pose = new_base
-                    affordance_pose = new_base[:]
-                    clear_line()
-                    print(f"\n  ✓ 基准点已重置为: {format_waypoint(base_pose)}")
-                else:
-                    clear_line()
-                    print("\n  ⚠️  重置失败，无法获取当前位姿")
+                elif cmd == "r":
+                    new_base = None
+                    if RESET_BASE_TO_AFFORDANCE_ON_R and AFFORDANCE_POSE is not None:
+                        new_base = list(AFFORDANCE_POSE)
+                    else:
+                        new_base = get_current_pose(robot)
+                    if new_base is not None:
+                        base_pose = new_base
+                        affordance_pose = new_base[:]
+                        clear_line()
+                        print(f"\n  ✓ Affordance 原点与局部坐标轴已重置为: {format_waypoint(base_pose)}")
+                    else:
+                        clear_line()
+                        print("\n  ⚠️  重置失败，无法获取当前位姿")
 
-            elif cmd.strip().lower() == "d":
-                if saved_waypoints:
-                    last_idx = len(saved_waypoints) - 1
-                    removed = saved_waypoints.pop()
-                    gripper_positions.pop(last_idx, None)
-                    clear_line()
-                    print(f"\n  🗑  已删除路点 {last_idx+1}: {format_waypoint(removed)}")
-                else:
-                    clear_line()
-                    print("\n  ⚠️  没有可删除的路点")
+                elif cmd == "d":
+                    if saved_waypoints:
+                        last_idx = len(saved_waypoints) - 1
+                        removed = saved_waypoints.pop()
+                        gripper_positions.pop(last_idx, None)
+                        clear_line()
+                        print(f"\n  🗑  已删除路点 {last_idx+1}: {format_waypoint(removed)}")
+                    else:
+                        clear_line()
+                        print("\n  ⚠️  没有可删除的路点")
 
-            else:
-                # 空输入（直接按 Enter）→ 保存当前偏移及夹爪状态
-                wp = last_offset[:]
-                idx = len(saved_waypoints)
-                saved_waypoints.append(wp)
-                g_info = ""
-                if dual_gripper is not None:
-                    gv = int(last_gripper)
-                    gripper_positions[idx] = gv
-                    g_info = f"  夹爪=[{gv}]"
-                clear_line()
-                print(f"\n  ✓ 路点 {idx+1} 已保存: {format_waypoint(wp)}{g_info}")
+                elif cmd == "\n":
+                    # Enter → 保存当前局部相对位姿及夹爪状态
+                    wp = last_offset[:]
+                    idx = len(saved_waypoints)
+                    saved_waypoints.append(wp)
+                    g_info = ""
+                    if dual_gripper is not None:
+                        gv = int(last_gripper)
+                        gripper_positions[idx] = gv
+                        g_info = f"  夹爪=[{gv}]"
+                    clear_line()
+                    print(f"\n  ✓ 路点 {idx+1} 已保存: {format_waypoint(wp)}{g_info}")
 
     except KeyboardInterrupt:
         stop_flag.set()
@@ -341,5 +424,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

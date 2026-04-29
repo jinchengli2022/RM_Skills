@@ -26,3 +26,30 @@ src/outputs/
 handeye_output/
 outputs/
 vibe/
+tests/
+
+# Local tool state
+.codex
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+docs/
+
+# Build artifacts
+build/
+dist/
+
+# Python bytecode
+*.pyo
+*.pyd
+
+# Editor / temp files
+*.swp
+*.swo
+*~

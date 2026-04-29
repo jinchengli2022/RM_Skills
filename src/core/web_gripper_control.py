@@ -199,15 +199,17 @@ def set_right_gripper_position_via_web(position: int, **kwargs) -> Dict[str, Any
         )
 
 if __name__ == "__main__":
-    for i in range(5):
-        set_left_gripper_position_via_web(0)
-        set_right_gripper_position_via_web(1000)
-        time.sleep(1)
-        set_left_gripper_position_via_web(1000)
-        set_right_gripper_position_via_web(0)
-        time.sleep(1)
+    # for i in range(5):
+    #     set_left_gripper_position_via_web(0)
+    #     set_right_gripper_position_via_web(1000)
+    #     time.sleep(1)
+    #     set_left_gripper_position_via_web(1000)
+    #     set_right_gripper_position_via_web(0)
+    #     time.sleep(1)
 
-    # Example usage:
+
+    set_left_gripper_position_via_web(0)
+    set_left_gripper_position_via_web(1000)    # Example usage:
     # export REALMAN_TOKEN='...'
     # python web_gripper_control.py
     # try:

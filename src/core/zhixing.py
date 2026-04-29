@@ -168,24 +168,22 @@ if __name__ == "__main__":
         setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
         client.sendall(json.dumps(setup_cmd).encode('utf-8'))
         print("Modbus mode setup response:", client.recv(1024).decode())
-        for i in range(50):
+        # for i in range(50):
 
             
             # 执行开合测试
-            gripper.open_gripper()  # 打开夹爪
-            time.sleep(1)
-            gripper.close_gripper()          # 关闭夹爪
-            time.sleep(1)
-            #设置夹爪力值
-            # gripper.set_gipper_force(100, 1)
-            # time.sleep(1)
-            # #read gripper force
-            # setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
-            # client.sendall(json.dumps(setup_cmd).encode('utf-8'))
-            # print("Modbus mode setup response:", client.recv(1024).decode())
-            # gripper.open_gripper(delay=3.0)  # 打开夹爪
-            # time.sleep(1)
-            # gripper.close_gripper()          # 关闭夹爪
+        gripper.open_gripper()  # 打开夹爪
+        time.sleep(1)
+        gripper.close_gripper()          # 关闭夹爪
+        time.sleep(1)
+
+        # 设置夹爪力值
+        # gripper.set_gipper_force(100, 1)
+        # time.sleep(1)
+        # 读夹爪力值
+        # setup_cmd = {"command": "read_holding_registers", "port": 1, "address": 261, "device": 1}
+        # client.sendall(json.dumps(setup_cmd).encode('utf-8'))
+        # print("Modbus mode setup response:", client.recv(1024).decode())
 
     except Exception as e:
         print(f"Error occurred: {str(e)}")
